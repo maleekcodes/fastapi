@@ -70,3 +70,4 @@ openai>=1.0.0
 pydub>=0.25.1
 rapidfuzz>=3.0.0
 hypercorn>=0.14.4
+yt-dlp>=2024.1.0

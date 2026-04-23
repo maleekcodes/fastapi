@@ -20,6 +20,7 @@ import httpx
 from rapidfuzz import fuzz
 from starlette.websockets import WebSocketDisconnect
 from websockets.exceptions import ConnectionClosed, ConnectionClosedError, ConnectionClosedOK
+from video_downloader import get_video_metadata, download_video, cleanup_download, VideoDownloadError
 
 # Load environment variables from .env file
 load_dotenv()
@@ -125,73 +126,6 @@ def update_job(job_id: str, status: str):
 
 def delete_job(job_id: str):
     del jobs[job_id]
-
-def get_video_details(url: str):
-    api_url = "https://social-download-all-in-one.p.rapidapi.com/v1/social/autolink"
-
-    payload = { "url": url }
-    headers = {
-        "x-rapidapi-host": "social-download-all-in-one.p.rapidapi.com",
-        "Content-Type": "application/json",
-        "x-rapidapi-key": "9d7a175492msh3af097f4b5f7a5bp129d76jsncb53c5c2df45"
-    }
-
-    response = requests.post(api_url, json=payload, headers=headers)
-    result = response.json()
-    
-    print(f"Video details response: {result}")
-    
-    return result
-
-def extract_thumbnail_from_details(video_details: dict) -> str:
-    """Extract thumbnail URL from video details, trying multiple possible field names"""
-    # Try common thumbnail field names
-    thumbnail_fields = ['thumbnail', 'thumbnailUrl', 'thumb', 'picture', 'cover', 'image', 'poster']
-    
-    for field in thumbnail_fields:
-        if field in video_details and video_details[field]:
-            print(f"Found thumbnail in field '{field}': {video_details[field]}")
-            return video_details[field]
-    
-    # Check if thumbnail might be nested in medias array
-    if 'medias' in video_details and video_details['medias']:
-        for media in video_details['medias']:
-            if isinstance(media, dict):
-                for field in thumbnail_fields:
-                    if field in media and media[field]:
-                        print(f"Found thumbnail in medias[].{field}: {media[field]}")
-                        return media[field]
-    
-    # Check for pictureUrl (some APIs use this)
-    if 'pictureUrl' in video_details and video_details['pictureUrl']:
-        print(f"Found thumbnail in 'pictureUrl': {video_details['pictureUrl']}")
-        return video_details['pictureUrl']
-    
-    print(f"No thumbnail found in video details. Available keys: {list(video_details.keys())}")
-    return None
-
-def extract_title_from_details(video_details: dict, source: str = None) -> str:
-    """Extract title from video details, filtering out useless default titles"""
-    # List of useless/default titles to ignore
-    useless_titles = [
-        "- Facebook Reel",
-        "Facebook Reel",
-        "Instagram Reel",
-        "- Instagram Reel",
-        "Reel",
-        "Video",
-        "TikTok Video",
-    ]
-    
-    if 'title' in video_details and video_details['title']:
-        title = video_details['title'].strip()
-        # Check if title is useless
-        if title in useless_titles or title.startswith("- ") and len(title) < 20:
-            print(f"Ignoring useless title: {title}")
-            return None
-        print(f"Found title: {title[:50]}...")
-        return title
-    return None
 
 def generate_title_from_transcription(full_text: str, max_length: int = 100) -> str:
     """Generate a title from the beginning of transcription text"""
@@ -358,48 +292,24 @@ def process_and_upload_thumbnail(thumbnail_url: str, job_id: str) -> str:
     
     return upload_thumbnail(thumbnail_data, job_id)
 
-def extract_video_url_from_details(video_details: dict, source: str) -> str:
-    """Extract the video URL from video details, handling various response formats"""
-    # Try medias array first
-    if 'medias' in video_details and video_details['medias']:
-        index = SOURCES_TO_INDEX.get(source, 0)
-        if len(video_details['medias']) > index:
-            media = video_details['medias'][index]
-            if isinstance(media, dict) and 'url' in media:
-                return media['url']
-            elif isinstance(media, str):
-                return media
-    
-    # Try direct url field
-    if 'url' in video_details:
-        return video_details['url']
-    
-    # Try videoUrl field
-    if 'videoUrl' in video_details:
-        return video_details['videoUrl']
-    
-    # Try download field
-    if 'download' in video_details:
-        return video_details['download']
-    
-    print(f"Could not extract video URL. Available keys: {list(video_details.keys())}")
-    return None
 
 def transcribe_video(original_url: str, video_url: str, job_id: str, credits_cost: int, source: str, duration: int, user_id: str, should_upload: bool = True, media_type: str = "video", thumbnail_url: str = None, title: str = None, file_name: str = None):
     try:
-        # Track start time for processing duration
         start_time = time.time()
-        
+
         _, job = get_job(job_id)
-        update_job(job_id, "transcribing video")
-        transcription = whisper.transcribe(video_url)
-        
-        update_job(job_id, "transcribed video")
-        raw_video = get_raw_video(video_url)
-        
-        # Validate video was actually downloaded
+        update_job(job_id, "downloading video")
+
+        if source == "internal":
+            raw_video = get_raw_video(video_url)
+            local_file_path = None
+        else:
+            local_file_path, file_size = download_video(original_url, job_id)
+            with open(local_file_path, "rb") as f:
+                raw_video = f.read()
+
         if len(raw_video) == 0:
-            raise Exception("Failed to download video: file is empty. The video URL may be expired or invalid.")
+            raise Exception("Failed to download video: file is empty.")
 
         update_job(job_id, "processing video")
 
@@ -407,6 +317,9 @@ def transcribe_video(original_url: str, video_url: str, job_id: str, credits_cos
             upload_url = upload_video(raw_video, job_id)
         else:
             upload_url = video_url
+
+        update_job(job_id, "transcribing video")
+        transcription = whisper.transcribe(upload_url)
 
         # Calculate processing duration
         end_time = time.time()
@@ -472,6 +385,9 @@ def transcribe_video(original_url: str, video_url: str, job_id: str, credits_cos
             "error": str(e),
             "updatedAt": datetime.now()
         })
+    finally:
+        if source != "internal":
+            cleanup_download(job_id)
 
 def transcribe_video_openai(original_url: str, video_url: str, job_id: str, credits_cost: int, source: str, duration: int, user_id: str, should_upload: bool = True, media_type: str = "video", thumbnail_url: str = None, title: str = None, file_name: str = None):
     """Transcribe video using OpenAI's GPT-4o with speaker diarization"""
@@ -490,25 +406,25 @@ def transcribe_video_openai(original_url: str, video_url: str, job_id: str, cred
         
         _, job = get_job(job_id)
         update_job(job_id, "downloading video")
-        
-        # Download the video file
-        raw_video = get_raw_video(video_url)
-        
-        # Check file size (OpenAI has a 25 MB limit)
+
+        if source == "internal":
+            raw_video = get_raw_video(video_url)
+            temp_file_path = f"/tmp/{job_id}.mp4"
+            with open(temp_file_path, "wb") as f:
+                f.write(raw_video)
+        else:
+            temp_file_path, file_size = download_video(original_url, job_id)
+            with open(temp_file_path, "rb") as f:
+                raw_video = f.read()
+
         file_size_mb = len(raw_video) / (1024 * 1024)
         print(f"Video file size: {file_size_mb:.2f} MB")
-        
-        # Validate video was actually downloaded
+
         if len(raw_video) == 0:
-            raise Exception("Failed to download video: file is empty. The video URL may be expired or invalid.")
-        
-        if file_size_mb < 0.001:  # Less than 1KB is suspicious
-            raise Exception(f"Downloaded file is too small ({len(raw_video)} bytes). The video URL may be invalid.")
-        
-        # Save video temporarily
-        temp_file_path = f"/tmp/{job_id}.mp4"
-        with open(temp_file_path, "wb") as f:
-            f.write(raw_video)
+            raise Exception("Failed to download video: file is empty.")
+
+        if file_size_mb < 0.001:
+            raise Exception(f"Downloaded file is too small ({len(raw_video)} bytes).")
         
         all_segments = []
         full_text = ""
@@ -805,6 +721,9 @@ def transcribe_video_openai(original_url: str, video_url: str, job_id: str, cred
             "error": str(e),
             "updatedAt": datetime.now()
         })
+    finally:
+        if source != "internal":
+            cleanup_download(job_id)
 
 
 def handle_transcribe(url: str, original_url: str, user_id: str, duration: int, source: str, thumbnail_url: str = None, media_type: str = "video", title: str = None, file_name: str = None):
@@ -944,26 +863,24 @@ def transcribe(payload: TranscribePayload):
     user = db.collection("users").document(payload.user_id)
 
     print(user.get())
-    
+
     if not user.get().exists:
         raise fastapi.HTTPException(status_code=404, detail="User not found")
-    
-    video_details = get_video_details(payload.url)
-    
-    # Extract video URL, thumbnail URL and title from video details
-    source = video_details.get('source', 'unknown')
-    video_url = extract_video_url_from_details(video_details, source)
-    if not video_url:
-        raise fastapi.HTTPException(status_code=400, detail="Could not extract video URL from source")
-    
-    thumbnail_url = extract_thumbnail_from_details(video_details)
-    title = extract_title_from_details(video_details, source)
+
+    try:
+        metadata = get_video_metadata(payload.url)
+    except VideoDownloadError as e:
+        raise fastapi.HTTPException(status_code=400, detail=str(e))
+
+    source = metadata.get('source', 'unknown')
+    thumbnail_url = metadata.get('thumbnail')
+    title = metadata.get('title')
 
     return handle_transcribe(
-        video_url,
+        payload.url,
         payload.url,
         payload.user_id,
-        video_details.get('duration', 0),
+        metadata.get('duration', 0),
         source,
         thumbnail_url,
         "video",
@@ -1079,26 +996,24 @@ def transcribe_v3(payload: TranscribePayload):
     user = db.collection("users").document(payload.user_id)
 
     print(user.get())
-    
+
     if not user.get().exists:
         raise fastapi.HTTPException(status_code=404, detail="User not found")
-    
-    video_details = get_video_details(payload.url)
-    
-    # Extract video URL, thumbnail URL and title from video details
-    source = video_details.get('source', 'unknown')
-    video_url = extract_video_url_from_details(video_details, source)
-    if not video_url:
-        raise fastapi.HTTPException(status_code=400, detail="Could not extract video URL from source")
-    
-    thumbnail_url = extract_thumbnail_from_details(video_details)
-    title = extract_title_from_details(video_details, source)
+
+    try:
+        metadata = get_video_metadata(payload.url)
+    except VideoDownloadError as e:
+        raise fastapi.HTTPException(status_code=400, detail=str(e))
+
+    source = metadata.get('source', 'unknown')
+    thumbnail_url = metadata.get('thumbnail')
+    title = metadata.get('title')
 
     return handle_transcribe_openai(
-        video_url,
+        payload.url,
         payload.url,
         payload.user_id,
-        video_details.get('duration', 0),
+        metadata.get('duration', 0),
         source,
         "video",
         thumbnail_url,
