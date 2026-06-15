@@ -1,6 +1,6 @@
-# transcrybe-python
+# transcrybe-fastapi
 
-FastAPI backend for Transcryb.
+FastAPI backend for Transcryb (Railway deployment).
 
 ## Share links
 
@@ -30,6 +30,14 @@ COBALT_API_URL=https://cobalt-production-7dd4.up.railway.app/
 DEEPGRAM_API_KEY=...
 DEEPGRAM_MODEL=nova-3
 DEEPGRAM_LANGUAGE=en
+DEEPGRAM_DIARIZE_MODEL=latest
+DEEPGRAM_MAX_SPEAKERS=6
+
+# Replicate (V1 Whisper)
+REPLICATE_API_TOKEN=...
+
+# Railway Firebase credentials
+FIREBASE_SERVICE_ACCOUNT_BASE64=...
 ```
 
 ### Video URL resolution (hybrid)
@@ -54,11 +62,17 @@ Query params sent to Deepgram: `model=nova-3`, `diarize_model=latest`, `max_spea
 
 ```bash
 conda activate transcryb
-cd transcrybe-python
-python transcrybe.py
+cd fastapi
+pip install -r requirements.txt
+hypercorn main:app --reload
+# or: python transcrybe.py
 ```
 
-Server runs at `http://localhost:8000`. Restart after pulling backend changes so new routes (e.g. `POST /api/v3/sample-transcription/share`) are registered.
+Server runs at `http://localhost:8000`. Restart after pulling backend changes so new routes are registered.
+
+### Railway deployment
+
+Production starts via `hypercorn main:app --bind "[::]:$PORT"` (see `railway.json`). Set env vars in the Railway dashboard; use `FIREBASE_SERVICE_ACCOUNT_BASE64` instead of a local `service_account.json`.
 
 ### Firestore
 

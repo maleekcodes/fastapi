@@ -1,6 +1,7 @@
 from threading import Thread
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
+import base64
 import json
 import mimetypes
 import secrets
@@ -33,7 +34,13 @@ load_dotenv()
 app = fastapi.FastAPI()
 api = fastapi.FastAPI()
 
-cred = credentials.Certificate("service_account.json")
+service_account_base64 = os.getenv("FIREBASE_SERVICE_ACCOUNT_BASE64")
+if service_account_base64:
+    service_account_data = json.loads(base64.b64decode(service_account_base64))
+    cred = credentials.Certificate(service_account_data)
+else:
+    cred = credentials.Certificate("service_account.json")
+
 firebase_admin.initialize_app(cred)
 
 db = firestore.client()
